@@ -7,7 +7,7 @@ app.use(cors());
 app.use(express.json());
 
 const openai = new OpenAI({
-  apiKey: "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"
+  apiKey: process.env.OPENAI_API_KEY
 });
 
 app.post("/chat", async (req, res) => {
@@ -89,3 +89,4 @@ Du är en digital AI-expert som hjälper företag att växa genom smartare syste
 app.listen(3000, () => {
   console.log("✅ Zenvia AI körs på http://localhost:3000");
 });
+
