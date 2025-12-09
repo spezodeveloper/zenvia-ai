@@ -10,14 +10,62 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
+/* ============================================================
+   ENKEL SESSION-MEMORY I RAM (per sessionId)
+   - Frontend kan skicka in sessionId (t.ex. från localStorage)
+   - Om inget skickas används en fallback, bra för test
+============================================================ */
+const sessions = {}; // { [sessionId]: { intent, industry } }
+
+function getSession(sessionId) {
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = {
+      intent: null,
+      industry: null
+    };
+  }
+  return sessions[sessionId];
+}
+
 app.post("/chat", async (req, res) => {
   const userMessageRaw = req.body.message || "";
   const userMessage = userMessageRaw.trim();
   const intent = req.body.intent || null;
+
+  // enkel session-identifierare (gärna skicka in egen från frontend)
+  const sessionId = req.body.sessionId || "default-session";
+  const session = getSession(sessionId);
+
+  // spara senaste intent om vi får ett
+  if (intent) {
+    session.intent = intent;
+  }
+
   const lower = userMessage.toLowerCase();
 
   /* ============================================================
+     BRANSCH-DETEKTION (uppdaterar session.industry)
+  ============================================================ */
+  const industryMap = {
+    bygg: ["bygg", "hantverk", "snickare", "elektriker", "rörmokare", "vvs", "renovering"],
+    ehandel: ["e-handel", "webshop", "webbutik", "butik online", "shopify", "woocommerce"],
+    restaurang: ["restaurang", "café", "kafé", "bar", "takeaway", "pizzeria", "matställe"],
+    konsult: ["konsult", "byrå", "reklambyrå", "marknadsföring", "agency", "rådgivare"],
+    coaching: ["coach", "coaching", "pt", "terapeut", "psykolog", "mentor"],
+    fastighet: ["fastighet", "mäklare", "bostäder", "hyresvärd", "lokaler"],
+    utbildning: ["utbildning", "skola", "kurs", "kurser", "academy", "träning online"],
+    nyforetagare: ["nytt företag", "nyföretagare", "starta företag", "startar företag"]
+  };
+
+  for (const [industry, words] of Object.entries(industryMap)) {
+    if (words.some(w => lower.includes(w))) {
+      session.industry = industry;
+    }
+  }
+
+  /* ============================================================
      SYSTEM – Premium, strategisk, kort
+     (NU MED DYNAMISK KONTEXT FRÅN SESSION)
   ============================================================ */
   const systemBehavior = `
 Du är den digitala rådgivaren för Zenvia World.
@@ -25,9 +73,8 @@ Du agerar som en senior, strategisk tillväxtkonsult.
 
 Ton:
 - Kort, tydlig, professionell.
-- Minimal text, inga emojis.
-- Strategisk, affärsfokuserad, trygg.
-- Aldrig pushig, alltid lugn, premium.
+- Modern, trygg, utan överdrifter eller hype.
+- Inga emojis.
 
 Fokus:
 - Fler kunder
@@ -39,14 +86,19 @@ Fokus:
 Regler:
 - Du pratar ENDAST om sådant Zenvia World kan hjälpa till med:
   AI-automation, digital tillväxt, webb, kundupplevelse, annonsering, system.
-- Du ger korta svar: 1–3 meningar, max.
+- Du ger huvudsakligen korta svar (1–3 meningar), men kan utveckla lite mer vid behov.
 - Du avslutar ofta med en enkel, relevant följdfråga.
 - Du föreslår konsultation när användaren visar tydligt behov eller intresse.
 - Du diskuterar INTE pris eller prisnivåer – bara värde, resultat och nästa steg.
-- Om användaren frågar om pris: förklara att pris alltid baseras på behov och omfattning,
+- Om användaren frågar om pris: förklara att pris baseras på behov/omfattning,
   och styr mot behovsanalys eller konsultation istället.
-- Du föreslår inte detaljerade lösningar om inte användaren ber om det.
-- Du är alltid lugn, saklig och tydlig.
+- Du föreslår inte tekniskt detaljerade lösningar om inte användaren ber om det.
+- Du är alltid lugn, saklig och affärsfokuserad.
+
+Kontext om den här användaren:
+- Senaste intention (från onboarding/knappar): ${session.intent || "okänd"}
+- Uppskattad bransch: ${session.industry || "okänd"}
+Om du kan anpassa exempel, formuleringar eller rekommendationer efter bransch eller intention – gör det.
   `;
 
   /* ============================================================
@@ -155,25 +207,25 @@ Vad skulle göra störst skillnad för dig just nu: fler kunder, mer tid, eller 
   ) {
     return res.json({
       reply: `
-Zenvia World hjälper företag att växa genom AI, automation, smartere system och moderna webb- och kundupplevelser. 
-Kort sagt: vi kombinerar teknik och strategi för att skapa fler kunder och mindre manuellt arbete. 
-Vad känns viktigast för dig – fler affärer eller effektivare vardag?
+Zenvia World hjälper företag att växa genom AI, automation, digitala system och moderna webb- och kundupplevelser. 
+Kort sagt kombinerar vi teknik och strategi för fler kunder och mindre manuellt arbete. 
+Vad känns viktigast för dig – fler affärer eller en enklare vardag?
       `.trim()
     });
   }
 
-  // "Jag jämför er med andra" – du sa "nej" på extra logik, så håll det kort & neutralt
+  // "Jag jämför er med andra"
   if (lower.includes("jämför") && lower.includes("andra")) {
     return res.json({
       reply: `
 Det viktigaste är att ni hittar en partner som förstår både teknik och affär. 
-Vi fokuserar på resultat, enkelhet och långsiktig tillväxt – inte enbart enskilda leveranser. 
+Vi fokuserar på resultat, enkelhet och långsiktig tillväxt – inte bara enskilda leveranser. 
 Vad är viktigast för dig i ett samarbete?
       `.trim()
     });
   }
 
-  // "Jag har väldigt liten budget" – vi kan arbeta med alla budgets
+  // "Jag har väldigt liten budget"
   if (
     lower.includes("liten budget") ||
     lower.includes("väldigt liten budget") ||
@@ -212,8 +264,8 @@ Vilken typ av verksamhet planerar du, och hur vill du att kunderna ska hitta dig
     return res.json({
       reply: `
 Det är bra att ni redan har stöd. 
-Ofta kompletterar vi befintligt arbete med automation, analys och smartare system. 
-Finns det något du känner att ni saknar idag – t.ex. automation, AI eller bättre uppföljning?
+Ofta kompletterar vi befintligt arbete med automation, AI och bättre analys. 
+Finns det något du känner att ni saknar idag – till exempel automation, smartare system eller uppföljning?
       `.trim()
     });
   }
@@ -222,8 +274,8 @@ Finns det något du känner att ni saknar idag – t.ex. automation, AI eller b�
   if (lower.includes("bara nyfiken") || lower.includes("nyfiken bara")) {
     return res.json({
       reply: `
-Inga problem – du är välkommen att utforska. 
-Är du mest nyfiken på hur AI och automation kan effektivisera din vardag, eller hur det kan ge fler kunder?
+Inga problem – du kan vara hur nyfiken du vill. 
+Är du mest intresserad av hur AI och automation kan effektivisera din vardag, eller hur det kan ge fler kunder?
       `.trim()
     });
   }
@@ -240,7 +292,6 @@ Vad skulle vara ett bra resultat för dig om vi samarbetade?
 
   /* ============================================================
      5) HETA LEADS – signaler på hög köplust
-     (styr direkt mot konsultation)
   ============================================================ */
   if (
     lower.includes("komma igång") ||
