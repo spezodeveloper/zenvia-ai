@@ -86,7 +86,10 @@ Du är en digital AI-expert som hjälper företag att växa genom smartare syste
   });
 });
 
-app.listen(3000, () => {
-  console.log("✅ Zenvia AI körs på http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 Zenvia AI körs på port ${PORT}`);
 });
+
 
