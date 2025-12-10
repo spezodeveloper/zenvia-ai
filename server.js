@@ -46,22 +46,68 @@ app.post("/chat", async (req, res) => {
   /* ============================================================
      BRANSCH-DETEKTION (uppdaterar session.industry)
   ============================================================ */
-  const industryMap = {
-    bygg: ["bygg", "hantverk", "snickare", "elektriker", "rörmokare", "vvs", "renovering"],
-    ehandel: ["e-handel", "webshop", "webbutik", "butik online", "shopify", "woocommerce"],
-    restaurang: ["restaurang", "café", "kafé", "bar", "takeaway", "pizzeria", "matställe"],
-    konsult: ["konsult", "byrå", "reklambyrå", "marknadsföring", "agency", "rådgivare"],
-    coaching: ["coach", "coaching", "pt", "terapeut", "psykolog", "mentor"],
-    fastighet: ["fastighet", "mäklare", "bostäder", "hyresvärd", "lokaler"],
-    utbildning: ["utbildning", "skola", "kurs", "kurser", "academy", "träning online"],
-    nyforetagare: ["nytt företag", "nyföretagare", "starta företag", "startar företag"]
-  };
+/* ============================================================
+   HYBRID BRANSCH-DETEKTION (Regler + AI-validering)
+============================================================ */
 
-  for (const [industry, words] of Object.entries(industryMap)) {
-    if (words.some(w => lower.includes(w))) {
-      session.industry = industry;
-    }
+// 1. STRIKTA KEYWORDS
+const industryMap = {
+  bygg: [" bygg", " hantverk", " snickare", " elektriker", " vvs ", " renovering"],
+  ehandel: ["e-handel", "webshop", "webbutik", "shopify", "woocommerce"],
+  restaurang: [" restaurang", " café ", " kafé ", " pizzeria ", " matställe "],
+  konsult: [" konsult", " byrå", " agency", " rådgivare"],
+  coaching: [" coach", " coaching", " terapeut", " mentor"],
+  fastighet: [" mäklare", " fastighet", " hyresvärd", " lokaler"],
+  utbildning: [" skola", " kurs", " kurser", " academy", " utbildning"],
+  nyforetagare: [" nytt företag", " starta företag", " startar företag"]
+};
+
+// 2. SÄKER TEXT (för att undvika "bar" vs "bra")
+const safeLower = ` ${lower} `;
+
+// 3. Hitta potentiell bransch via regler
+let detectedIndustry = null;
+
+for (const [industry, words] of Object.entries(industryMap)) {
+  if (words.some(w => safeLower.includes(w))) {
+    detectedIndustry = industry;
+    break;
   }
+}
+
+// 4. AI-VALIDERING (endast om regler hittat något)
+async function validateIndustry(industryGuess, message) {
+  if (!industryGuess) return null;
+
+  const industryQuestion = `
+Text från användaren:
+"${message}"
+
+Påstådd bransch: ${industryGuess}
+
+Svara ENDAST med "ja" eller "nej".
+Är detta med stor sannolikhet rätt bransch?
+  `;
+
+  const check = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      { role: "system", content: "Du är extremt strikt. Svara endast ja eller nej." },
+      { role: "user", content: industryQuestion }
+    ],
+    max_tokens: 1,
+    temperature: 0
+  });
+
+  const answer = check.choices[0].message.content.trim().toLowerCase();
+  return answer === "ja" ? industryGuess : null;
+}
+
+// 5. Kör hybridklassningen
+if (!session.industry && detectedIndustry) {
+  session.industry = await validateIndustry(detectedIndustry, userMessage);
+}
+
 
   /* ============================================================
      SYSTEM – Premium, strategisk, kort
@@ -350,3 +396,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Zenvia World AI körs på port ${PORT}`);
 });
+
