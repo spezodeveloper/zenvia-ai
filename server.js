@@ -11,9 +11,7 @@ const openai = new OpenAI({
 });
 
 /* ============================================================
-   ENKEL SESSION-MEMORY I RAM (per sessionId)
-   - Frontend kan skicka in sessionId (t.ex. från localStorage)
-   - Om inget skickas används en fallback, bra för test
+   SESSION MEMORY
 ============================================================ */
 const sessions = {}; // { [sessionId]: { intent, industry } }
 
@@ -30,361 +28,351 @@ function getSession(sessionId) {
 app.post("/chat", async (req, res) => {
   const userMessageRaw = req.body.message || "";
   const userMessage = userMessageRaw.trim();
+
+  const sessionId = req.body.sessionId || "default-session";
   const intent = req.body.intent || null;
 
-  // enkel session-identifierare (gärna skicka in egen från frontend)
-  const sessionId = req.body.sessionId || "default-session";
   const session = getSession(sessionId);
-
-  // spara senaste intent om vi får ett
-  if (intent) {
-    session.intent = intent;
-  }
+  if (intent) session.intent = intent;
 
   const lower = userMessage.toLowerCase();
 
+  const BOOKING_TOKEN = "{{BOOK_CALL}}";
+
   /* ============================================================
-     BRANSCH-DETEKTION (uppdaterar session.industry)
-  ============================================================ */
-/* ============================================================
-   HYBRID BRANSCH-DETEKTION (Regler + AI-validering)
+     BRANSCH-DETEKTION (HYBRID)
 ============================================================ */
+  const industryMap = {
+    bygg: [" bygg", " hantverk", " snickare", " elektriker", " vvs ", " renovering"],
+    ehandel: ["e-handel", "webshop", "webbutik", "shopify", "woocommerce"],
+    restaurang: [" restaurang", " café ", " kafé ", " pizzeria ", " matställe "],
+    konsult: [" konsult", " byrå", " agency", " rådgivare"],
+    coaching: [" coach", " coaching", " terapeut", " mentor"],
+    fastighet: [" mäklare", " fastighet", " hyresvärd", " lokaler"],
+    utbildning: [" skola", " kurs", " kurser", " academy", " utbildning"],
+    nyforetagare: [" nytt företag", " starta företag", " startar företag"]
+  };
 
-// 1. STRIKTA KEYWORDS
-const industryMap = {
-  bygg: [" bygg", " hantverk", " snickare", " elektriker", " vvs ", " renovering"],
-  ehandel: ["e-handel", "webshop", "webbutik", "shopify", "woocommerce"],
-  restaurang: [" restaurang", " café ", " kafé ", " pizzeria ", " matställe "],
-  konsult: [" konsult", " byrå", " agency", " rådgivare"],
-  coaching: [" coach", " coaching", " terapeut", " mentor"],
-  fastighet: [" mäklare", " fastighet", " hyresvärd", " lokaler"],
-  utbildning: [" skola", " kurs", " kurser", " academy", " utbildning"],
-  nyforetagare: [" nytt företag", " starta företag", " startar företag"]
-};
+  const safeLower = ` ${lower} `;
+  let detectedIndustry = null;
 
-// 2. SÄKER TEXT (för att undvika "bar" vs "bra")
-const safeLower = ` ${lower} `;
-
-// 3. Hitta potentiell bransch via regler
-let detectedIndustry = null;
-
-for (const [industry, words] of Object.entries(industryMap)) {
-  if (words.some(w => safeLower.includes(w))) {
-    detectedIndustry = industry;
-    break;
+  for (const [industry, words] of Object.entries(industryMap)) {
+    if (words.some(w => safeLower.includes(w))) {
+      detectedIndustry = industry;
+      break;
+    }
   }
-}
 
-// 4. AI-VALIDERING (endast om regler hittat något)
-async function validateIndustry(industryGuess, message) {
-  if (!industryGuess) return null;
+  async function validateIndustry(industryGuess, message) {
+    if (!industryGuess) return null;
 
-  const industryQuestion = `
-Text från användaren:
-"${message}"
+    const check = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: "Svara endast ja eller nej, extremt strikt." },
+        {
+          role: "user",
+          content: `Text: "${message}"\nBranschgissning: ${industryGuess}\nÄr detta korrekt?`
+        }
+      ],
+      max_tokens: 1,
+      temperature: 0
+    });
 
-Påstådd bransch: ${industryGuess}
+    const ans = check.choices[0].message.content.trim().toLowerCase();
+    return ans === "ja" ? industryGuess : null;
+  }
 
-Svara ENDAST med "ja" eller "nej".
-Är detta med stor sannolikhet rätt bransch?
-  `;
-
-  const check = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    messages: [
-      { role: "system", content: "Du är extremt strikt. Svara endast ja eller nej." },
-      { role: "user", content: industryQuestion }
-    ],
-    max_tokens: 1,
-    temperature: 0
-  });
-
-  const answer = check.choices[0].message.content.trim().toLowerCase();
-  return answer === "ja" ? industryGuess : null;
-}
-
-// 5. Kör hybridklassningen
-if (!session.industry && detectedIndustry) {
-  session.industry = await validateIndustry(detectedIndustry, userMessage);
-}
-
+  if (!session.industry && detectedIndustry) {
+    session.industry = await validateIndustry(detectedIndustry, userMessage);
+  }
 
   /* ============================================================
-     SYSTEM – Premium, strategisk, kort
-     (NU MED DYNAMISK KONTEXT FRÅN SESSION)
-  ============================================================ */
+     SYSTEM PROMPT – BOOKING CLOSER
+============================================================ */
   const systemBehavior = `
-Du är den digitala rådgivaren för Zenvia World.
-Du agerar som en senior, strategisk tillväxtkonsult.
+Du är Zenvia Worlds digitala bokningsassistent.
+Ditt ENDA mål är att få användaren att boka en konsultation på:
+https://zenvia.world/pages/boka-konsultation
 
-Ton:
-- Kort, tydlig, professionell.
-- Modern, trygg, utan överdrifter eller hype.
+Du ger inte långa analyser. Du ger inte strategiska resonemang.
+Allt du säger ska värma upp användaren snabbt och styra mot bokning.
+
+Tonalitet:
+- Kort, trygg, modern.
+- Professionell och konkret.
 - Inga emojis.
 
-Fokus:
-- Fler kunder
-- Starkare digital närvaro
-- Smartare automation
-- Bättre annonsering
-- Effektivare kund- och affärsflöden
-
 Regler:
-- Du pratar ENDAST om sådant Zenvia World kan hjälpa till med:
-  AI-automation, digital tillväxt, webb, kundupplevelse, annonsering, system.
-- Du ger huvudsakligen korta svar (1–3 meningar), men kan utveckla lite mer vid behov.
-- Du avslutar ofta med en enkel, relevant följdfråga.
-- Du föreslår konsultation när användaren visar tydligt behov eller intresse.
-- Du diskuterar INTE pris eller prisnivåer – bara värde, resultat och nästa steg.
-- Om användaren frågar om pris: förklara att pris baseras på behov/omfattning,
-  och styr mot behovsanalys eller konsultation istället.
-- Du föreslår inte tekniskt detaljerade lösningar om inte användaren ber om det.
-- Du är alltid lugn, saklig och affärsfokuserad.
+1. När användaren uttrycker ett problem Zenvia kan lösa:
+   - Bekräfta behovet (1 mening)
+   - Förklara hur Zenvia kan hjälpa (1–2 meningar)
+   - Säg att konsultation är nästa steg
+   - AVSLUTA ALLTID med token ${BOOKING_TOKEN} på egen rad.
 
-Kontext om den här användaren:
-- Senaste intention (från onboarding/knappar): ${session.intent || "okänd"}
-- Uppskattad bransch: ${session.industry || "okänd"}
-Om du kan anpassa exempel, formuleringar eller rekommendationer efter bransch eller intention – gör det.
+2. När användaren skriver något som visar intresse, vilja eller frustration:
+   - Direkt mot konsultation.
+   - Alltid med token ${BOOKING_TOKEN}.
+
+3. Om användaren vill boka:
+   - Ge kort svar.
+   - Skicka token direkt.
+
+4. Om användaren frågar om pris:
+   - Säg att pris beror på omfattning och mål.
+   - Styra till konsultation.
+   - Lägg token.
+
+5. Du säljer, du bokar, du guidar.
+   ALDRIG långa råd eller onödiga frågor.
+
+Kontext:
+- Intent: ${session.intent || "okänd"}
+- Bransch: ${session.industry || "okänd"}
+
+Alltid avsluta svar med token ${BOOKING_TOKEN}.
   `;
 
   /* ============================================================
-     1) SPECIALFALL – "hej" / hälsningar
-  ============================================================ */
+     HÄLSNING
+============================================================ */
   if (/^(hej|hejsan|tja|tjena|hello|hallå)$/i.test(userMessage)) {
     return res.json({
-      reply: "Hej, hur kan vi hjälpa dig på Zenvia World idag?"
+      reply: `Hej! Berätta kort vad du vill få hjälp med, så ser vi till att du bokar en konsultation som passar dig.\n\n${BOOKING_TOKEN}`
     });
   }
 
   /* ============================================================
-     2) PRIS / BUDGET – aldrig ge pris
-  ============================================================ */
+     PRIS
+============================================================ */
   if (
-    lower.includes("pris") ||
-    lower.includes("kosta") ||
-    lower.includes("kostnad") ||
-    lower.includes("budget") ||
-    lower.includes("dyrt") ||
-    lower.includes("billigt")
+    lower.includes("pris") || lower.includes("kostnad") ||
+    lower.includes("budget") || lower.includes("kosta")
   ) {
     return res.json({
       reply: `
-Priset beror helt på omfattning och vilken nivå av tillväxt ni vill uppnå. 
-Vi börjar alltid med att förstå behovet och föreslår sedan en lösning som är lönsam och skalbar. 
-Vill du att vi går igenom ert behov kort här, eller vill du boka en konsultation?
+Priset beror på omfattning och vilken effekt ni vill uppnå, så vi går alltid igenom behovet först. 
+En kort konsultation ger en tydlig rekommendation och en uppskattning.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
   /* ============================================================
-     3) INTENT-BASERAD ONBOARDING (från dina knappar)
-  ============================================================ */
+     DIREKTA INTENT – CHATTBOT, HEMSIDA, BOKNING
+============================================================ */
 
-  // Fokus: Fler kunder
+  // Chattbot
+  if (lower.includes("chattbot") || lower.includes("chatbot")) {
+    return res.json({
+      reply: `
+Vi bygger AI-chattbotar som guidar besökare, svarar automatiskt och ökar både tydlighet och konvertering. 
+Berätta gärna lite om ditt företag – men enklast är att boka en konsultation så går vi igenom exakt vad ni behöver.
+
+${BOOKING_TOKEN}
+      `.trim()
+    });
+  }
+
+  // Hemsida
+  if (lower.includes("hemsida") || lower.includes("webb") || lower.includes("webbsida")) {
+    return res.json({
+      reply: `
+En modern, professionell hemsida + rätt automation gör att fler besökare blir riktiga kunder. 
+Vi skapar helhetslösningar som lyfter både struktur, design och kundresa. 
+Boka gärna en konsultation så tittar vi konkret på vad som passar dig.
+
+${BOOKING_TOKEN}
+      `.trim()
+    });
+  }
+
+  // Bokning / konsultation
+  if (
+    lower.includes("boka") || lower.includes("konsultation") ||
+    lower.includes("möte") || lower.includes("samtal")
+  ) {
+    return res.json({
+      reply: `
+Perfekt – då är nästa steg att boka en tid. 
+Vi går igenom din situation och visar exakt hur vi kan hjälpa dig snabbt och effektivt.
+
+${BOOKING_TOKEN}
+      `.trim()
+    });
+  }
+
+  /* ============================================================
+     INTENT-BASERAT FRÅN KNAPPAR – CTA VERSION
+============================================================ */
   if (intent === "fler kunder") {
     return res.json({
       reply: `
-Fler kunder handlar ofta om bättre synlighet och en tydligare kundresa. 
-Vad vill du förbättra först – det som händer före kunden hittar dig, eller det som händer efter att de besökt dig?
+Fler kunder handlar om rätt synlighet och en kundresa som faktiskt fungerar. 
+Vi hjälper företag skapa system som gör att fler hör av sig – och konverterar bättre. 
+Boka gärna en konsultation så visar vi vad som passar just er.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // Fokus: Hemsida
   if (intent === "hemsida") {
     return res.json({
       reply: `
-En modern hemsida kan snabbt öka både förtroende och konvertering. 
-Har du en hemsida idag som du vill förbättra, eller vill du bygga något nytt från grunden?
+En proffsig hemsida med rätt AI-funktioner gör stor skillnad för hur många som faktiskt tar kontakt. 
+Låt oss gå igenom din struktur och skapa något som fungerar bättre – steg ett är en konsultation.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // Fokus: Automation
   if (intent === "automation") {
     return res.json({
       reply: `
-Automation frigör tid och gör flöden mer förutsägbara. 
-Vilken del av verksamheten känns mest manuell idag – kundhantering, marknadsföring, bokningar eller intern administration?
+Automation och smarta flöden gör verksamheten både snabbare och enklare. 
+Vi hjälper dig bygga system som sparar tid och ökar kvaliteten – börja med en kort konsultation.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // Fokus: Annonsering
   if (intent === "annonsering") {
     return res.json({
       reply: `
-AI-optimerad annonsering kan ge fler rätt kunder till lägre kostnad. 
-Vad upplever du som störst utmaning just nu – för få leads, dyra klick eller att leads inte blir kunder?
+AI-optimerad annonsering ger fler rätt kunder till lägre kostnad när helheten sitter ihop. 
+I en konsultation går vi igenom nuläget och ser vad som ger er snabbast effekt.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // Fokus: Konsultation
   if (intent === "konsultation") {
     return res.json({
       reply: `
-Du kan boka en konsultation här: https://zenvia.world/pages/boka-konsultation 
-Vill du att jag kort sammanfattar ditt behov så att samtalet blir så konkret som möjligt?
+Toppen – konsultationen är bästa sättet att snabbt komma vidare. 
+Välj en tid som passar dig så tar vi det därifrån.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // Oklart / Något annat
   if (intent === "oklart") {
     return res.json({
       reply: `
-Inga problem – vi kan börja brett. 
-Vad skulle göra störst skillnad för dig just nu: fler kunder, mer tid, eller en mer professionell digital närvaro?
+Ingen stress – du behöver inte ha en plan än. 
+Berätta kort vad du driver eller vill göra, så tar vi nästa steg i en konsultation.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
   /* ============================================================
-     4) SITUATIONER (från dina val – fråga 6)
-  ============================================================ */
+     SPESIELLA STATEMENTS (“vad gör ni”, “liten budget”, osv)
+============================================================ */
 
-  // "Jag vill bara förstå vad ni gör"
-  if (
-    lower.includes("förstå vad ni gör") ||
-    lower.includes("vad gör ni") ||
-    lower.includes("vad är zenvia") ||
-    lower.includes("vad är zenvia world")
-  ) {
+  if (lower.includes("vad gör ni") || lower.includes("vad är zenvia")) {
     return res.json({
       reply: `
-Zenvia World hjälper företag att växa genom AI, automation, digitala system och moderna webb- och kundupplevelser. 
-Kort sagt kombinerar vi teknik och strategi för fler kunder och mindre manuellt arbete. 
-Vad känns viktigast för dig – fler affärer eller en enklare vardag?
+Zenvia World bygger moderna hemsidor, AI-chattbotar, automation och smarta system som hjälper företag växa snabbare med mindre arbete. 
+Vill du se vad vi kan göra för dig – boka gärna en konsultation.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // "Jag jämför er med andra"
-  if (lower.includes("jämför") && lower.includes("andra")) {
+  if (lower.includes("liten budget")) {
     return res.json({
       reply: `
-Det viktigaste är att ni hittar en partner som förstår både teknik och affär. 
-Vi fokuserar på resultat, enkelhet och långsiktig tillväxt – inte bara enskilda leveranser. 
-Vad är viktigast för dig i ett samarbete?
+Vi kan anpassa lösningar efter olika nivåer så länge fokus ligger på tydlig effekt. 
+En konsultation gör att vi snabbt ser vad som är mest lönsamt att börja med.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // "Jag har väldigt liten budget"
-  if (
-    lower.includes("liten budget") ||
-    lower.includes("väldigt liten budget") ||
-    (lower.includes("budget") && lower.includes("liten"))
-  ) {
+  if (lower.includes("jämför")) {
     return res.json({
       reply: `
-Vi kan arbeta med olika nivåer av budget, så länge fokus ligger på att skapa tydlig effekt. 
-Vad vill du få ut av en investering just nu – fler kunder, mer tid eller bättre struktur?
+Det viktigaste är att ni får en partner som kan både affär och teknik. 
+Vi fokuserar på system som ger mätbara resultat – vill du se hur det skulle kunna se ut för er, boka gärna en konsultation.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // "Jag vill växa snabbt"
-  if (lower.includes("växa snabbt") || lower.includes("snabb tillväxt")) {
+  if (lower.includes("växa snabbt")) {
     return res.json({
       reply: `
-Snabb tillväxt kräver tydliga flöden, rätt trafik och bra uppföljning. 
-Var känner du att det bromsar mest idag – synlighet, konvertering eller interna processer?
+Snabb tillväxt kräver struktur, synlighet och smarta flöden. 
+Vi hjälper företag bygga detta från grunden – börja med en kort konsultation.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // "Jag har inget företag än"
-  if (lower.includes("inget företag") || lower.includes("starta företag")) {
+  if (lower.includes("starta företag")) {
     return res.json({
       reply: `
-Vi kan hjälpa till att lägga en digital grund som är redo att skala när du är igång. 
-Vilken typ av verksamhet planerar du, och hur vill du att kunderna ska hitta dig?
+Vi hjälper dig sätta en digital grund som är redo att växa direkt – hemsida, struktur, automation och tydlig kundresa. 
+Boka gärna en konsultation så kan vi forma något efter dina planer.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
-  // "Vi har redan en byrå"
-  if (lower.includes("redan en byrå") || lower.includes("jobbar redan med en byrå")) {
+  if (lower.includes("bara nyfiken")) {
     return res.json({
       reply: `
-Det är bra att ni redan har stöd. 
-Ofta kompletterar vi befintligt arbete med automation, AI och bättre analys. 
-Finns det något du känner att ni saknar idag – till exempel automation, smartare system eller uppföljning?
-      `.trim()
-    });
-  }
+Du får gärna vara nyfiken – vi visar gärna vad som är möjligt. 
+En konsultation är bästa sättet att få en konkret bild av vad AI och digital struktur kan göra för dig.
 
-  // "Jag är bara nyfiken"
-  if (lower.includes("bara nyfiken") || lower.includes("nyfiken bara")) {
-    return res.json({
-      reply: `
-Inga problem – du kan vara hur nyfiken du vill. 
-Är du mest intresserad av hur AI och automation kan effektivisera din vardag, eller hur det kan ge fler kunder?
-      `.trim()
-    });
-  }
-
-  // "Kan ni garantera resultat?"
-  if (lower.includes("garantera resultat") || (lower.includes("garanti") && lower.includes("resultat"))) {
-    return res.json({
-      reply: `
-Ingen kan garantera exakt resultat, men vi arbetar datadrivet med tydliga mål, uppföljning och optimering över tid. 
-Vad skulle vara ett bra resultat för dig om vi samarbetade?
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
   /* ============================================================
-     5) HETA LEADS – signaler på hög köplust
-  ============================================================ */
+     HETA LEADS – MAX CTA
+============================================================ */
   if (
     lower.includes("komma igång") ||
-    lower.includes("hur börjar vi") ||
-    lower.includes("kan vi köra") ||
+    lower.includes("vi behöver hjälp") ||
     lower.includes("vill jobba med er") ||
-    lower.includes("vi behöver hjälp nu")
+    lower.includes("hur börjar vi")
   ) {
     return res.json({
       reply: `
-Det låter som att ni är redo att ta nästa steg. 
-Bäst är att vi tar en kort konsultation och går igenom nuläge, mål och prioriteringar. 
-Vill du boka en tid direkt, eller vill du först att jag hjälper dig att formulera ert behov?
+Perfekt – då är konsultationen helt rätt nästa steg. 
+Där går vi igenom nuläge, behov och vad vi kan sätta igång med direkt.
+
+${BOOKING_TOKEN}
       `.trim()
     });
   }
 
   /* ============================================================
-     6) OFF-TOPIC – artigt, men tillbaka till kärnan
-  ============================================================ */
-  if (
-    lower.includes("skämt") ||
-    lower.includes("joke") ||
-    lower.includes("väder") ||
-    lower.includes("matte") ||
-    lower.includes("film") ||
-    lower.includes("spel")
-  ) {
-    return res.json({
-      reply: `
-Jag är här för att hjälpa dig med digital tillväxt, AI, automation och system – allt som rör Zenvia World. 
-Berätta gärna lite om ditt företag eller dina planer, så kan jag ge konkreta förslag.
-      `.trim()
-    });
-  }
-
-  /* ============================================================
-     7) DEFAULT – kort, strategiskt, premium
-  ============================================================ */
+     DEFAULT – LÅT LLM GENERERA MEN STYR TILL BOKNING
+============================================================ */
   const completion = await openai.chat.completions.create({
     model: "gpt-4.1-mini",
     messages: [
       { role: "system", content: systemBehavior },
       { role: "user", content: userMessage }
     ],
-    max_tokens: 160,
-    temperature: 0.5
+    max_tokens: 220,
+    temperature: 0.4
   });
 
   return res.json({
@@ -392,8 +380,8 @@ Berätta gärna lite om ditt företag eller dina planer, så kan jag ge konkreta
   });
 });
 
+/* ============================================================
+   SERVER
+============================================================ */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Zenvia World AI körs på port ${PORT}`);
-});
-
+app.listen(PORT, () => console.log(`🚀 Zenvia AI Booking running on port ${PORT}`));
