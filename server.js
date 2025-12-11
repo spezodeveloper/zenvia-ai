@@ -132,6 +132,11 @@ function pick(list, last) {
   return out;
 }
 
+let currentSessionId = "";
+let currentUserMessage = "";
+let currentIntent = "";
+let currentUrl = "";
+let currentDevice = "";
 /* ============================================================
    reply() SYSTEM (ALT C)
 ============================================================ */
@@ -139,10 +144,30 @@ function pick(list, last) {
 let globalRes = null;
 let finalMessage = "";
 
-function reply(text) {
+async function reply(text) {
   finalMessage = text;
+const session = getSession(currentSessionId);
+
+  try {
+    await logToSheet({
+      sessionId: currentSessionId,
+      userMessage: currentUserMessage,
+      botReply: text,
+      intent: currentIntent,
+      service: detectService(currentUserMessage || ""),
+      industry: getSession(currentSessionId).industry,
+      ctaDelivered: text.includes(BOOK_CALL),
+      url: currentUrl,
+      device: currentDevice
+    });
+  } catch (err) {
+    console.error("Logging failed inside reply():", err);
+  }
+
   return globalRes.json({ reply: text });
 }
+
+
 
 function send(res, text) {
   return reply(text);
@@ -187,8 +212,10 @@ function detectService(msg) {
 /* ============================================================
    INTENT CLASSIFIER
 ============================================================ */
+
 async function classify(message) {
   const prompt = `
+  
 Klassificera följande meddelande till EN intent.
 
 INTENTS:
@@ -255,6 +282,13 @@ app.post("/chat", async (req, res) => {
 
   const intent = await classify(msg);
   session.lastIntent = intent;
+
+   currentSessionId = req.body.sessionId || "default";
+currentUserMessage = msg;
+currentIntent = intent;
+currentUrl = req.body.pageUrl || "";
+currentDevice = req.body.device || "";
+
 
   /* ===== INTENTS ===== */
 
@@ -379,17 +413,27 @@ app.post("/chat", async (req, res) => {
   /* ============================================================
      LOG TO SHEETS
   ============================================================ */
-  await logToSheet({
-    sessionId: req.body.sessionId,
-    userMessage: msg,
-    botReply: finalMessage,
-    intent,
-    service: detectService(msg),
-    industry: session.industry,
-    ctaDelivered: finalMessage.includes(BOOK_CALL),
-    url: req.body.pageUrl || "",
-    device: req.body.device || ""
-  });
+/* ============================================================
+   LOG TO SHEETS (ONLY IF NOT ALREADY LOGGED BY reply())
+============================================================ */
+if (finalMessage) {
+  try {
+    await logToSheet({
+      sessionId: currentSessionId,
+      userMessage: currentUserMessage,
+      botReply: finalMessage,
+      intent: currentIntent,
+      service: detectService(currentUserMessage || ""),
+      industry: getSession(currentSessionId).industry,
+      ctaDelivered: finalMessage.includes(BOOK_CALL),
+      url: currentUrl,
+      device: currentDevice
+    });
+  } catch (err) {
+    console.error("Logging failed at end of /chat:", err);
+  }
+}
+
 });
 
 /* ============================================================
@@ -399,3 +443,4 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
   console.log(`🚀 Zenvia AI Server running on port ${PORT}`)
 );
+
