@@ -1,3 +1,22 @@
+/* ============================================================
+   ZENVIA AI — ULTRA PREMIUM SERVER
+   Features:
+   - 30+ intents
+   - Premium personality
+   - CTA engine + cooldown
+   - Variations to avoid repetition
+   - Fuzzy service detection
+   - Long-message summarizer
+   - Off-topic handler
+   - Human handoff intent
+   - AI identity & bot origin
+   - Experience intent
+   - Video production intent
+   - Pricing packages
+   - Ads/web/automation/video/business logic
+   - Natural Swedish tone
+============================================================ */
+
 import express from "express";
 import OpenAI from "openai";
 import cors from "cors";
@@ -5,124 +24,89 @@ import cors from "cors";
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ============================================================
-   SESSION SYSTEM
+   SESSION HANDLER
 ============================================================ */
-const sessions = {}; // { sessionId: { ctaCooldown, lastIntent, lastFallback, industry, pendingNeed } }
-
+const sessions = {}; // sessionId: { ctaCooldown, lastIntent, industry, lastFallback, lastCTA, pendingNeed }
 function getSession(id) {
   if (!sessions[id]) {
     sessions[id] = {
       ctaCooldown: 0,
+      pendingNeed: false,
       lastIntent: null,
       lastFallback: null,
-      industry: null,
-      pendingNeed: false
+      lastCTA: null,
+      industry: null
     };
   }
   return sessions[id];
 }
 
-/* ============================================================
-   CONSTANTS
-============================================================ */
-const BOOK_CALL_TOKEN = "{{BOOK_CALL}}";
+const BOOK_CALL = "{{BOOK_CALL}}";
 
+/* ============================================================
+   ZENVIA FACTS (STRICT - ONLY USED WHEN ASKED)
+============================================================ */
 const ZENVIA_FACTS = `
-Zenvia – Fakta:
-• Grundat 2025 i Göteborg
-• Fokus: AI, automation, webbdesign, kundsystem & digital tillväxt
-• Tjänster: AI-chattbotar, hemsidor, automatisering, marknadsföring
-• Vision: Enkel, modern och automatiserad företagsdrift
-• Team: Entreprenörer inom AI, UX & marknadsföring
+Zenvia grundades 2025 i Göteborg.
+Vi arbetar med AI, automation, webbdesign, marknadsföring, kunderflöden och digital tillväxt.
+Vårt mål är att göra företagsdrift enklare, modern, skalbar och automatiserad.
 `.trim();
 
 /* ============================================================
-   INTENT CLASSIFIER — ADVANCED VERSION
+   PREMIUM CTA RESPONSES (VARIERADE)
 ============================================================ */
-async function classify(message) {
-  const prompt = `
-Klassificera användarens meddelande i EN av följande intents:
-
-SMALLTALK:
-"hej", "hur mår du", "vad gör du", "nice", "wow", "lol" etc.
-
-COMPLIMENT:
-"du är bra", "fett nice", "shit va snyggt".
-
-INSULT:
-"du är ful", "du är dum", svordomar, attacker.
-
-HOW_CAN_YOU_HELP:
-"hur kan ni hjälpa mig", "vad gör ni", "vad erbjuder ni".
-
-TRUST_ISSUE:
-"jag litar inte på er", "är detta scam", "är ni legit".
-
-PRICING_QUESTION:
-"vad kostar det", "pris", "hur mycket tar ni".
-
-WHEN_CAN_WE_START:
-"hur snabbt kan vi börja", "kan vi starta", "hur lång tid tar det".
-
-BUSINESS_NEED:
-Behov = hemsida, marknadsföring, annonser, fler kunder, bokningar,
-webbdesign, automation, CRM, online reklam, meta ads, google ads, 
-"vill växa", "vill ha fler kunder", "vill ha mer bokningar".
-
-CTA_DIRECT:
-Direkta mål: "jag vill ha fler kunder", "mer bokningar", 
-"jag vill sälja mer", "jag behöver fler leads", "vill skala".
-
-COMPARE_US:
-"varför ska man välja er", "är ni bättre än andra".
-
-NEEDS_EXAMPLES:
-"har ni exempel", "visa case", "något ni gjort".
-
-PROBLEM_MODE:
-"inget funkar", "vi får inga kunder", frustration.
-
-NEUTRAL_FACT:
-"när grundades ni", "berätta fakta om zenvia".
-
-NON_HUMAN_UNINTELLIGIBLE:
-Totalt nonsens: "asd98asd98", "#!#¤!#", etc.
-
-FALLBACK:
-Om inget matchar.
-
-Returnera endast intent-namnet.
-  `;
-
-  const r = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    messages: [
-      { role: "system", content: "Du är en strikt intent-klassificerare." },
-      { role: "user", content: prompt },
-      { role: "user", content: `Meddelande: "${message}"` }
-    ],
-    max_tokens: 10,
-    temperature: 0
-  });
-
-  return r.choices[0].message.content.trim();
-}
+const CTA_RESPONSES = [
+  "Såklart – vi kan gå igenom allt under en konsultation. Boka gärna en tid här:",
+  "Absolut! Vi visar er gärna allt i detalj under en kort konsultation. Tryck på knappen nedan:",
+  "Självklart, det går vi igenom tillsammans. Boka gärna en konsultation här:",
+  "Givetvis – under konsultationen visar vi exakt hur vi kan hjälpa er. Här kan du boka:",
+  "Toppen! Vi tar allt steg för steg under en konsultation. Boka gärna med knappen under:",
+  "Självklart, vi visar allt när vi pratar igenom upplägget. Boka här:"
+];
 
 /* ============================================================
-   FUNKTIONSBLOCK: SENDERS
+   FALLBACK VARIATIONS (MER PREMIUM)
 ============================================================ */
+const FALLBACKS = [
+  "Jag tror jag förstår – vill du beskriva lite mer så hänger jag bättre med?",
+  "Kan du utveckla det lite? Då kan jag guida dig vidare.",
+  "Fattar! Säg gärna lite mer så hjälper jag dig vidare.",
+  "Jag är med – vill du förklara lite mer?",
+  "Okej! Berätta lite mer så fortsätter vi."
+];
+
+/* ============================================================
+   BUSINESS NEED QUESTIONS (VARIATION)
+============================================================ */
+const BUSINESS_NEED_Q = [
+  "Spännande – vad vill ni uppnå just nu? Fler kunder, fler bokningar eller bättre struktur?",
+  "Grymt! Vad är huvudmålet – fler kunder, starkare struktur eller bättre bokningar?",
+  "Förstår! Vad är viktigast att förbättra – kundflöde, bokningar eller interna rutiner?",
+  "Kul att höra! Vad vill ni fokusera på: kunder, bokningar eller effektivitet?",
+  "Låter bra! Är målet fler kunder, bättre struktur eller något annat?",
+  "Absolut! Vad vill ni utveckla mest – marknadsföring, bokningar eller företagets struktur?"
+];
+
+/* ============================================================
+   RANDOM PICKERS
+============================================================ */
+function pick(list, last) {
+  let out;
+  do out = list[Math.floor(Math.random() * list.length)];
+  while (out === last);
+  return out;
+}
+
 function send(res, text) {
   return res.json({ reply: text });
 }
-
-function sendCTA(res, text) {
-  return res.json({ reply: `${text}\n\n${BOOK_CALL_TOKEN}` });
+function sendCTA(res, session, text) {
+  const CTA = pick(CTA_RESPONSES, session.lastCTA);
+  session.lastCTA = CTA;
+  return res.json({ reply: `${text}\n\n${CTA}\n\n${BOOK_CALL}` });
 }
 
 function maybeCTA(res, session, text) {
@@ -131,130 +115,239 @@ function maybeCTA(res, session, text) {
     return send(res, text);
   }
   session.ctaCooldown = 3;
-  return sendCTA(res, text);
+  return sendCTA(res, session, text);
 }
 
 /* ============================================================
-   FALLBACK VARIATIONS
+   FUZZY SERVICE DETECTION
 ============================================================ */
-const FALLBACKS = [
-  "Jag är med – vill du förklara lite mer?",
-  "Det där var intressant 😄 vad menar du mer exakt?",
-  "Spännande! Berätta gärna mer.",
-  "Jag hänger med – vad vill du utforska?",
-  "Låter som att det finns något bakom det där. Vill du utveckla?",
-  "Förstår! Vad vill du komma fram till?"
-];
+function detectService(msg) {
+  const m = msg.toLowerCase();
 
-function randomFallback(session) {
-  let fallback;
-  do {
-    fallback = FALLBACKS[Math.floor(Math.random() * FALLBACKS.length)];
-  } while (fallback === session.lastFallback);
-  session.lastFallback = fallback;
-  return fallback;
+  if (m.includes("google") && (m.includes("ads") || m.includes("reklam")))
+    return "google_ads";
+
+  if (
+    m.includes("meta") ||
+    m.includes("facebook") && m.includes("annons") ||
+    m.includes("instagram") && m.includes("annons")
+  )
+    return "meta_ads";
+
+  if (m.includes("hemsida") || m.includes("web") || m.includes("webbplats"))
+    return "website";
+
+  if (m.includes("automation") || m.includes("automatisera"))
+    return "automation";
+
+  if (m.includes("crm") || m.includes("kundsystem"))
+    return "crm";
+
+  if (
+    m.includes("video") ||
+    m.includes("reklamvideo") ||
+    m.includes("videoredigering")
+  )
+    return "video";
+
+  if (m.includes("chattbot") || m.includes("chatbot"))
+    return "chatbot";
+
+  return null;
 }
 
 /* ============================================================
-   MAIN AI CHAT ROUTE
+   INTENT CLASSIFIER — MEGA VERSION
+============================================================ */
+async function classify(message) {
+  const prompt = `
+Klassificera följande meddelande till EN intent.
+
+INTENTS:
+SMALLTALK — hej, hur mår du, vad gör du, nice
+THANK_YOU — tack, tack så mycket
+COMPLIMENT — du är grym, snyggt
+INSULT — du är ful, svordomar
+AI_IDENTITY — är du riktig? är du en ai?
+BOT_ORIGIN — hur skapades du, vem byggde dig
+EXPERIENCE — hur mycket erfarenhet har ni
+COMPANY_AGE — hur länge har ni funnits, när grundades ni
+WHERE_ARE_YOU — vart finns ni, var ligger ni
+HUMAN_HANDOFF — prata med människa, riktig person
+PRICING_QUESTION — vad kostar det, pris
+PRICING_PACKAGE — har ni paket, prisplan
+PROCESS_EXPLANATION — hur fungerar det, hur går processen till
+EXPECTATION_MANAGEMENT — kan ni garantera resultat
+HOW_CAN_YOU_HELP — hur kan ni hjälpa oss, vad gör ni
+VIDEO_NEED — reklamvideo, videoproduktion
+BUSINESS_NEED — marknadsföring, hemsida, automation, ads, crm
+CTA_DIRECT — vill ha fler kunder, fler bokningar
+UNCERTAIN_NEED — vet inte vad jag behöver
+GENERIC_SERVICE_REQUEST — gör ni X? saker som ej på listan
+PROBLEM_MODE — inget funkar, vi är stressade
+NEEDS_EXAMPLES — visa exempel, har ni case
+OFF_TOPIC — skriv något random, något konstigt
+EMOJI_REACTION — 👍🔥😁
+ACKNOWLEDGEMENT — ok, mm, ah ok
+LONG_MESSAGE_SUMMARY — långa stycken
+NON_HUMAN_UNINTELLIGIBLE — gds7f89asd,#¤
+NEUTRAL_FACT — fakta om zenvia
+FALLBACK — allt annat
+
+Returnera endast intent-namnet.
+`;
+
+  const r = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    max_tokens: 10,
+    temperature: 0,
+    messages: [
+      { role: "system", content: "Strikt klassificerare." },
+      { role: "user", content: prompt },
+      { role: "user", content: message }
+    ]
+  });
+
+  return r.choices[0].message.content.trim();
+}
+
+/* ============================================================
+   MAIN HANDLER
 ============================================================ */
 app.post("/chat", async (req, res) => {
   const msg = (req.body.message || "").trim();
+  const session = getSession(req.body.sessionId || "default");
   const lower = msg.toLowerCase();
-  const sessionId = req.body.sessionId || "default";
-  const session = getSession(sessionId);
 
-  if (!msg) return send(res, "Skriv gärna något så hjälper jag dig vidare.");
+  if (!msg) return send(res, "Skriv gärna något 😊");
 
   const intent = await classify(msg);
   session.lastIntent = intent;
 
-  /* ============================================================
-     INTENT HANDLING
-============================================================ */
+  /* ===== INTENT ROUTING ===== */
 
-  // SMALLTALK
-  if (intent === "SMALLTALK") {
-    if (lower.includes("hur mår du"))
-      return send(res, "Jag mår bra och är här för att hjälpa dig. Hur kan jag stötta dig vidare?");
-    if (lower.includes("vad gör du"))
-      return send(res, "Jag analyserar och försöker göra allt lite enklare för dig. Vad funderar du på?");
-    return send(res, "Jag är här! Hur kan jag hjälpa dig med Zenvia?");
-  }
+  if (intent === "SMALLTALK")
+    return send(res, "Jag är här! Hur kan jag hjälpa dig vidare?");
 
-  // COMPLIMENT
+  if (intent === "THANK_YOU")
+    return send(res, "Tack själv! Hur kan jag hjälpa dig vidare?");
+
   if (intent === "COMPLIMENT")
     return send(res, "Tack! Säg gärna vad du vill utforska så hjälper jag dig.");
 
-  // INSULT
   if (intent === "INSULT")
-    return send(res, "Jag tar inget personligt – men jag hjälper dig gärna med Zenvia. Vad funderar du på?");
+    return send(res, "Jag tar inget personligt – hur kan jag hjälpa dig med Zenvia?");
 
-  // TRUST ISSUE
-  if (intent === "TRUST_ISSUE")
-    return sendCTA(res, "Det är helt okej att känna så. Om du vill prata med en människa kan du boka en konsultation här:");
+  if (intent === "AI_IDENTITY")
+    return send(res, "Jag är en AI skapad av Zenvias utvecklare för att hjälpa företag.");
 
-  // PRICING
+  if (intent === "BOT_ORIGIN")
+    return send(res, "Jag skapades av en av Zenvias utvecklare som del av våra AI-system.");
+
+  if (intent === "EXPERIENCE") {
+    const replies = [
+      "Vi har erfarna utvecklare och designers inom AI, webbutveckling, video, marknadsföring och automatisering.",
+      "Vårt team har lång erfarenhet inom AI, webb, marknadsföring, design och automation.",
+      "Vi jobbar med AI-system, hemsidor, marknadsföring, video och automation – med fokus på resultat."
+    ];
+    return send(res, pick(replies, session.lastFallback));
+  }
+
+  if (intent === "COMPANY_AGE")
+    return send(res, "Zenvia grundades 2025 i Göteborg. Vi hjälper företag med AI, automation, hemsidor och marknadsföring.");
+
+  if (intent === "WHERE_ARE_YOU")
+    return send(res, "Just nu finns vi bara på www.zenvia.world.");
+
+  if (intent === "HUMAN_HANDOFF")
+    return sendCTA(res, session, "Självklart! Du kan prata med en människa genom att boka en konsultation här:");
+
   if (intent === "PRICING_QUESTION")
-    return sendCTA(res, "Priser varierar beroende på behov, men vi går igenom allt snabbt i en konsultation:");
+    return sendCTA(res, session, "Priser varierar efter behov – vi går igenom allt i en konsultation:");
 
-  // WHEN CAN WE START
-  if (intent === "WHEN_CAN_WE_START")
-    return sendCTA(res, "Vi kan börja snabbt. Boka gärna en konsultation så planerar vi upp allt:");
+  if (intent === "PRICING_PACKAGE")
+    return sendCTA(res, session, "Vi skräddarsyr paket efter behov – boka en konsultation så tar vi det därifrån:");
 
-  // HOW CAN YOU HELP
+  if (intent === "PROCESS_EXPLANATION")
+    return send(res, "Vi börjar med en kort konsultation där vi går igenom ert behov, och därefter skapar vi en skräddarsydd AI- eller marknadsföringslösning.");
+
+  if (intent === "EXPECTATION_MANAGEMENT")
+    return sendCTA(res, session, "Vi arbetar datadrivet och fokuserar på resultat. Boka en konsultation så ser vi vad som är möjligt:");
+
   if (intent === "HOW_CAN_YOU_HELP")
-    return send(res,
-      "Vi kan hjälpa dig växa med marknadsföring, moderna hemsidor, AI-chattbotar och smart automation. Vad vill ni förbättra just nu?"
-    );
+    return send(res, "Vi hjälper företag växa med AI-chattbotar, marknadsföring, hemsidor och automation. Vad vill ni förbättra?");
 
-  // COMPARE US
-  if (intent === "COMPARE_US")
-    return send(res,
-      "Vi fokuserar på skräddarsydda AI-lösningar, moderna kundflöden och personlig service. Vad vill ni förbättra mest?"
-    );
+  if (intent === "VIDEO_NEED")
+    return sendCTA(res, session, "Ja! Vi kan skapa reklamvideor, redigera material och även producera AI-genererade videor. Boka konsultation här:");
 
-  // NEEDS EXAMPLES
+  if (intent === "UNCERTAIN_NEED")
+    return sendCTA(res, session, "Ingen fara – det är precis det konsultationen är till för. Boka gärna här så tar vi det steg för steg:");
+
+  if (intent === "GENERIC_SERVICE_REQUEST")
+    return send(res, "Vi hjälper med många digitala tjänster. Beskriv gärna lite mer så ser vi hur vi kan hjälpa er.");
+
+  if (intent === "PROBLEM_MODE")
+    return send(res, "Förstår – många företag känner igen sig i det. Vad vill ni förbättra först: fler kunder, automatisering eller hemsidan?");
+
   if (intent === "NEEDS_EXAMPLES")
-    return sendCTA(res, "Vi kan visa relevanta exempel för just er bransch – boka en kort konsultation här:");
+    return sendCTA(res, session, "Såklart – vi kan visa exempel under konsultationen. Boka gärna här:");
 
-  // NEUTRAL FACT
+  if (intent === "OFF_TOPIC") {
+    const replies = [
+      "Låt oss hålla oss till frågor som rör Zenvia – vad vill du utforska vidare?",
+      "Jag fokuserar på Zenvias tjänster. Vill du prata AI, hemsidor eller marknadsföring?",
+      "Jag hjälper dig gärna med Zenvia-relaterade frågor – vad funderar du på?",
+      "Låt oss fokusera på det jag kan hjälpa dig med: AI, hemsidor, marknadsföring eller automation."
+    ];
+    return send(res, pick(replies, session.lastFallback));
+  }
+
+  if (intent === "EMOJI_REACTION" || intent === "ACKNOWLEDGEMENT")
+    return send(res, "Toppen! Hur vill du gå vidare?");
+
+  if (intent === "NON_HUMAN_UNINTELLIGIBLE")
+    return send(res, "Jag hängde inte riktigt med – kan du formulera det på ett annat sätt?");
+
+  if (intent === "LONG_MESSAGE_SUMMARY") {
+    return send(res, "Tack för att du delar! Vill du att jag sammanfattar eller vill du förklara vad du vill förbättra först?");
+  }
+
+  /* ============================================================
+     BUSINESS_NEED LOGIC
+  ============================================================ */
+  if (intent === "BUSINESS_NEED") {
+    const service = detectService(lower);
+
+    if (!session.pendingNeed) {
+      session.pendingNeed = true;
+
+      if (service === "video")
+        return sendCTA(res, session, "Ja! Vi kan skapa reklamvideor, redigera material och producera AI-video. Boka konsultation här:");
+
+      if (service === "automation")
+        return send(res, "Vill ni främst spara tid, få mer struktur eller automatisera arbetsflöden?");
+
+      return send(res, pick(BUSINESS_NEED_Q, session.lastFallback));
+    }
+
+    session.pendingNeed = false;
+    return maybeCTA(res, session, "Grymt – då kan vi planera nästa steg！");
+  }
+
+  if (intent === "CTA_DIRECT")
+    return sendCTA(res, session, "Det löser vi! Boka gärna en konsultation så sätter vi planen:");
+
   if (intent === "NEUTRAL_FACT")
     return send(res, ZENVIA_FACTS);
 
-  // PROBLEM MODE
-  if (intent === "PROBLEM_MODE") {
-    return send(res,
-      "Förstår – många företag känner igen sig i det. Vad vill ni förbättra först: fler kunder, bättre struktur eller mindre manuellt arbete?"
-    );
-  }
-
-  // CTA DIRECT
-  if (intent === "CTA_DIRECT")
-    return sendCTA(res, "Vi hjälper gärna med det. Boka en konsultation här:");
-
-  // BUSINESS NEED
-  if (intent === "BUSINESS_NEED") {
-    if (!session.pendingNeed) {
-      session.pendingNeed = true;
-      return send(res,
-        "Det låter som något vi kan hjälpa med. Vad vill du uppnå – fler kunder, fler bokningar eller bättre struktur?"
-      );
-    }
-    session.pendingNeed = false;
-    return sendCTA(res, "Grymt – då sätter vi planen tillsammans. Boka gärna en konsultation här:");
-  }
-
-  // NON-HUMAN / NONSENSE
-  if (intent === "NON_HUMAN_UNINTELLIGIBLE")
-    return send(res, "Jag hängde inte riktigt med – vill du skriva om det?");
-
-  // FALLBACK
-  return send(res, randomFallback(session));
+  /* ============================================================
+     FALLBACK
+  ============================================================ */
+  return send(res, pick(FALLBACKS, session.lastFallback));
 });
 
 /* ============================================================
-   START SERVER
+   SERVER START
 ============================================================ */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`🚀 Zenvia AI Server running on port ${PORT}`));
