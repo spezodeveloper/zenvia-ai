@@ -1,20 +1,58 @@
 /* ============================================================
+   GOOGLE SHEETS LOGGER
+============================================================ */
+import { google } from "googleapis";
+
+async function logToSheet({
+  sessionId,
+  userMessage,
+  botReply,
+  intent,
+  service,
+  industry,
+  ctaDelivered,
+  url,
+  device
+}) {
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+    const auth = new google.auth.JWT(
+      credentials.client_email,
+      null,
+      credentials.private_key,
+      ["https://www.googleapis.com/auth/spreadsheets"]
+    );
+
+    const sheets = google.sheets({ version: "v4", auth });
+
+    const row = [
+      new Date().toISOString(),
+      sessionId || "",
+      userMessage || "",
+      botReply || "",
+      intent || "",
+      service || "",
+      industry || "",
+      ctaDelivered ? "YES" : "NO",
+      url || "",
+      device || ""
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.SHEET_ID,
+      range: "Sheet1!A1",
+      valueInputOption: "RAW",
+      resource: { values: [row] }
+    });
+
+  } catch (err) {
+    console.error("❌ Sheet logging failed:", err.message);
+  }
+}
+
+
+/* ============================================================
    ZENVIA AI — ULTRA PREMIUM SERVER
-   Features:
-   - 30+ intents
-   - Premium personality
-   - CTA engine + cooldown
-   - Variations to avoid repetition
-   - Fuzzy service detection
-   - Long-message summarizer
-   - Off-topic handler
-   - Human handoff intent
-   - AI identity & bot origin
-   - Experience intent
-   - Video production intent
-   - Pricing packages
-   - Ads/web/automation/video/business logic
-   - Natural Swedish tone
 ============================================================ */
 
 import express from "express";
@@ -29,7 +67,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 /* ============================================================
    SESSION HANDLER
 ============================================================ */
-const sessions = {}; // sessionId: { ctaCooldown, lastIntent, industry, lastFallback, lastCTA, pendingNeed }
+const sessions = {};
 function getSession(id) {
   if (!sessions[id]) {
     sessions[id] = {
@@ -47,7 +85,7 @@ function getSession(id) {
 const BOOK_CALL = "{{BOOK_CALL}}";
 
 /* ============================================================
-   ZENVIA FACTS (STRICT - ONLY USED WHEN ASKED)
+   ZENVIA FACTS
 ============================================================ */
 const ZENVIA_FACTS = `
 Zenvia grundades 2025 i Göteborg.
@@ -56,7 +94,7 @@ Vårt mål är att göra företagsdrift enklare, modern, skalbar och automatiser
 `.trim();
 
 /* ============================================================
-   PREMIUM CTA RESPONSES (VARIERADE)
+   CTA, FALLBACKS, NEED QUESTIONS
 ============================================================ */
 const CTA_RESPONSES = [
   "Såklart – vi kan gå igenom allt under en konsultation. Boka gärna en tid här:",
@@ -67,9 +105,6 @@ const CTA_RESPONSES = [
   "Självklart, vi visar allt när vi pratar igenom upplägget. Boka här:"
 ];
 
-/* ============================================================
-   FALLBACK VARIATIONS (MER PREMIUM)
-============================================================ */
 const FALLBACKS = [
   "Jag tror jag förstår – vill du beskriva lite mer så hänger jag bättre med?",
   "Kan du utveckla det lite? Då kan jag guida dig vidare.",
@@ -78,9 +113,6 @@ const FALLBACKS = [
   "Okej! Berätta lite mer så fortsätter vi."
 ];
 
-/* ============================================================
-   BUSINESS NEED QUESTIONS (VARIATION)
-============================================================ */
 const BUSINESS_NEED_Q = [
   "Spännande – vad vill ni uppnå just nu? Fler kunder, fler bokningar eller bättre struktur?",
   "Grymt! Vad är huvudmålet – fler kunder, starkare struktur eller bättre bokningar?",
@@ -91,7 +123,7 @@ const BUSINESS_NEED_Q = [
 ];
 
 /* ============================================================
-   RANDOM PICKERS
+   HELPERS
 ============================================================ */
 function pick(list, last) {
   let out;
@@ -100,19 +132,32 @@ function pick(list, last) {
   return out;
 }
 
-function send(res, text) {
-  return res.json({ reply: text });
+/* ============================================================
+   reply() SYSTEM (ALT C)
+============================================================ */
+
+let globalRes = null;
+let finalMessage = "";
+
+function reply(text) {
+  finalMessage = text;
+  return globalRes.json({ reply: text });
 }
+
+function send(res, text) {
+  return reply(text);
+}
+
 function sendCTA(res, session, text) {
   const CTA = pick(CTA_RESPONSES, session.lastCTA);
   session.lastCTA = CTA;
-  return res.json({ reply: `${text}\n\n${CTA}\n\n${BOOK_CALL}` });
+  return reply(`${text}\n\n${CTA}\n\n${BOOK_CALL}`);
 }
 
 function maybeCTA(res, session, text) {
   if (session.ctaCooldown > 0) {
     session.ctaCooldown--;
-    return send(res, text);
+    return reply(text);
   }
   session.ctaCooldown = 3;
   return sendCTA(res, session, text);
@@ -124,40 +169,23 @@ function maybeCTA(res, session, text) {
 function detectService(msg) {
   const m = msg.toLowerCase();
 
-  if (m.includes("google") && (m.includes("ads") || m.includes("reklam")))
-    return "google_ads";
-
+  if (m.includes("google") && (m.includes("ads") || m.includes("reklam"))) return "google_ads";
   if (
     m.includes("meta") ||
-    m.includes("facebook") && m.includes("annons") ||
-    m.includes("instagram") && m.includes("annons")
-  )
-    return "meta_ads";
-
-  if (m.includes("hemsida") || m.includes("web") || m.includes("webbplats"))
-    return "website";
-
-  if (m.includes("automation") || m.includes("automatisera"))
-    return "automation";
-
-  if (m.includes("crm") || m.includes("kundsystem"))
-    return "crm";
-
-  if (
-    m.includes("video") ||
-    m.includes("reklamvideo") ||
-    m.includes("videoredigering")
-  )
-    return "video";
-
-  if (m.includes("chattbot") || m.includes("chatbot"))
-    return "chatbot";
+    (m.includes("facebook") && m.includes("annons")) ||
+    (m.includes("instagram") && m.includes("annons"))
+  ) return "meta_ads";
+  if (m.includes("hemsida") || m.includes("web") || m.includes("webbplats")) return "website";
+  if (m.includes("automation") || m.includes("automatisera")) return "automation";
+  if (m.includes("crm") || m.includes("kundsystem")) return "crm";
+  if (m.includes("video") || m.includes("reklamvideo") || m.includes("videoredigering")) return "video";
+  if (m.includes("chattbot") || m.includes("chatbot")) return "chatbot";
 
   return null;
 }
 
 /* ============================================================
-   INTENT CLASSIFIER — MEGA VERSION
+   INTENT CLASSIFIER
 ============================================================ */
 async function classify(message) {
   const prompt = `
@@ -173,26 +201,26 @@ BOT_ORIGIN — hur skapades du, vem byggde dig
 EXPERIENCE — hur mycket erfarenhet har ni
 COMPANY_AGE — hur länge har ni funnits, när grundades ni
 WHERE_ARE_YOU — vart finns ni, var ligger ni
-HUMAN_HANDOFF — prata med människa, riktig person
-PRICING_QUESTION — vad kostar det, pris
-PRICING_PACKAGE — har ni paket, prisplan
-PROCESS_EXPLANATION — hur fungerar det, hur går processen till
+HUMAN_HANDOFF — prata med människa
+PRICING_QUESTION — vad kostar det
+PRICING_PACKAGE — har ni paket
+PROCESS_EXPLANATION — hur fungerar det
 EXPECTATION_MANAGEMENT — kan ni garantera resultat
-HOW_CAN_YOU_HELP — hur kan ni hjälpa oss, vad gör ni
-VIDEO_NEED — reklamvideo, videoproduktion
+HOW_CAN_YOU_HELP — hur kan ni hjälpa oss
+VIDEO_NEED — reklamvideo
 BUSINESS_NEED — marknadsföring, hemsida, automation, ads, crm
-CTA_DIRECT — vill ha fler kunder, fler bokningar
+CTA_DIRECT — vill ha fler kunder
 UNCERTAIN_NEED — vet inte vad jag behöver
-GENERIC_SERVICE_REQUEST — gör ni X? saker som ej på listan
-PROBLEM_MODE — inget funkar, vi är stressade
-NEEDS_EXAMPLES — visa exempel, har ni case
-OFF_TOPIC — skriv något random, något konstigt
-EMOJI_REACTION — 👍🔥😁
-ACKNOWLEDGEMENT — ok, mm, ah ok
-LONG_MESSAGE_SUMMARY — långa stycken
-NON_HUMAN_UNINTELLIGIBLE — gds7f89asd,#¤
+GENERIC_SERVICE_REQUEST — gör ni X?
+PROBLEM_MODE — inget funkar
+NEEDS_EXAMPLES — visa exempel
+OFF_TOPIC — random
+EMOJI_REACTION — 👍🔥
+ACKNOWLEDGEMENT — ok, mm
+LONG_MESSAGE_SUMMARY — långa meddelanden
+NON_HUMAN_UNINTELLIGIBLE — slumptext
 NEUTRAL_FACT — fakta om zenvia
-FALLBACK — allt annat
+FALLBACK — annat
 
 Returnera endast intent-namnet.
 `;
@@ -215,6 +243,10 @@ Returnera endast intent-namnet.
    MAIN HANDLER
 ============================================================ */
 app.post("/chat", async (req, res) => {
+
+  globalRes = res;
+  finalMessage = "";
+
   const msg = (req.body.message || "").trim();
   const session = getSession(req.body.sessionId || "default");
   const lower = msg.toLowerCase();
@@ -224,7 +256,7 @@ app.post("/chat", async (req, res) => {
   const intent = await classify(msg);
   session.lastIntent = intent;
 
-  /* ===== INTENT ROUTING ===== */
+  /* ===== INTENTS ===== */
 
   if (intent === "SMALLTALK")
     return send(res, "Jag är här! Hur kan jag hjälpa dig vidare?");
@@ -308,9 +340,8 @@ app.post("/chat", async (req, res) => {
   if (intent === "NON_HUMAN_UNINTELLIGIBLE")
     return send(res, "Jag hängde inte riktigt med – kan du formulera det på ett annat sätt?");
 
-  if (intent === "LONG_MESSAGE_SUMMARY") {
+  if (intent === "LONG_MESSAGE_SUMMARY")
     return send(res, "Tack för att du delar! Vill du att jag sammanfattar eller vill du förklara vad du vill förbättra först?");
-  }
 
   /* ============================================================
      BUSINESS_NEED LOGIC
@@ -343,11 +374,28 @@ app.post("/chat", async (req, res) => {
   /* ============================================================
      FALLBACK
   ============================================================ */
-  return send(res, pick(FALLBACKS, session.lastFallback));
+  send(res, pick(FALLBACKS, session.lastFallback));
+
+  /* ============================================================
+     LOG TO SHEETS
+  ============================================================ */
+  await logToSheet({
+    sessionId: req.body.sessionId,
+    userMessage: msg,
+    botReply: finalMessage,
+    intent,
+    service: detectService(msg),
+    industry: session.industry,
+    ctaDelivered: finalMessage.includes(BOOK_CALL),
+    url: req.body.pageUrl || "",
+    device: req.body.device || ""
+  });
 });
 
 /* ============================================================
    SERVER START
 ============================================================ */
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Zenvia AI Server running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`🚀 Zenvia AI Server running on port ${PORT}`)
+);
